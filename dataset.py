@@ -1,7 +1,8 @@
-"""Dataset utilities for supervised emotional-support language modeling.
+"""
+Dataset utilities for supervised emotional-support language modeling.
 
-``EmotionalSupportDataset`` converts prompt/target JSON samples into fixed-size
-token tensors. Prompt tokens and padding tokens are masked with ``-100`` so the
+EmotionalSupportDataset converts prompt/target JSON samples into fixed-size
+token tensors. Prompt tokens and padding tokens are masked with -100 so the
 loss is calculated only on the assistant response.
 """
 
@@ -15,7 +16,6 @@ from tokenizers import Tokenizer
 
 
 class EmotionalSupportDataset(Dataset):
-    """Load emotional-support prompt/response pairs as causal LM examples."""
 
     def __init__(
         self,
@@ -23,14 +23,6 @@ class EmotionalSupportDataset(Dataset):
         tokenizer_path,
         max_length=512
     ):
-        """Create a tokenized dataset from prepared JSON samples.
-
-        Args:
-            data_path: Path to the JSON file containing ``prompt`` and
-                ``target`` fields.
-            tokenizer_path: Path to the trained Hugging Face Tokenizers file.
-            max_length: Fixed sequence length used for truncation and padding.
-        """
 
         self.tokenizer = Tokenizer.from_file(
             tokenizer_path
@@ -50,12 +42,24 @@ class EmotionalSupportDataset(Dataset):
             "[PAD]"
         )
 
-    def __len__(self):
-        """Return the number of prompt/target pairs in the dataset."""
-        return len(self.samples)
+        self.bos_id = self.tokenizer.token_to_id(
+            "[BOS]"
+        )
 
-    def __getitem__(self, idx):
-        """Return one padded training example with masked prompt labels."""
+        self.eos_id = self.tokenizer.token_to_id(
+            "[EOS]"
+        )
+
+    def __len__(self):
+
+        return len(
+            self.samples
+        )
+
+    def __getitem__(
+        self,
+        idx
+    ):
 
         sample = self.samples[idx]
 
@@ -75,21 +79,25 @@ class EmotionalSupportDataset(Dataset):
             prompt_text
         ).ids
 
-        target_ids = self.tokenizer.encode(
-            target
-        ).ids
+        target_ids = (
+            self.tokenizer.encode(
+                target
+            ).ids
+            + [self.eos_id]
+        )
 
-        # Ensure prompt never consumes
-        # the entire sequence length
-        if len(prompt_ids) >= self.max_length - 1:
+        # Reserve room for BOS and EOS
+
+        if len(prompt_ids) >= self.max_length - 2:
 
             prompt_ids = prompt_ids[
-                : self.max_length - 1
+                : self.max_length - 2
             ]
 
         available_space = (
             self.max_length
             - len(prompt_ids)
+            - 1
         )
 
         target_ids = target_ids[
@@ -97,12 +105,14 @@ class EmotionalSupportDataset(Dataset):
         ]
 
         full_ids = (
-            prompt_ids
+            [self.bos_id]
+            + prompt_ids
             + target_ids
         )
 
         attention_mask = (
-            [1] * len(full_ids)
+            [1]
+            * len(full_ids)
         )
 
         padding_length = (
@@ -132,11 +142,18 @@ class EmotionalSupportDataset(Dataset):
 
         labels = input_ids.clone()
 
-        prompt_length = len(
-            prompt_ids
+        # Mask BOS + prompt tokens
+
+        prompt_length = (
+            len(prompt_ids)
+            + 1
         )
 
-        labels[:prompt_length] = -100
+        labels[
+            :prompt_length
+        ] = -100
+
+        # Mask padding
 
         labels[
             attention_mask == 0
@@ -181,7 +198,9 @@ if __name__ == "__main__":
 
     bad_samples = 0
 
-    for i in range(len(dataset)):
+    for i in range(
+        len(dataset)
+    ):
 
         sample = dataset[i]
 
@@ -190,6 +209,7 @@ if __name__ == "__main__":
         ).sum().item()
 
         if valid_targets == 0:
+
             bad_samples += 1
 
     print(

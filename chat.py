@@ -1,9 +1,8 @@
-"""Interactive terminal chat for the emotional-support MiniGPT model.
+"""
+Interactive terminal chat for the emotional-support MiniGPT model.
 
-This script loads the trained tokenizer and best checkpoint, collects an
-emotion/problem pair from the user, and then runs a simple multi-turn chat loop.
-Responses are sampled with temperature, top-k filtering, and a repetition
-penalty so the tiny model can produce more varied supportive text.
+Loads tokenizer.json and checkpoints/best_model.pt,
+then runs a multi-turn emotional-support chat session.
 """
 
 import torch
@@ -13,26 +12,49 @@ from tokenizers import Tokenizer
 from model import MiniGPT
 
 
+# ==========================================================
+# Config
+# ==========================================================
+
 DEVICE = (
     "mps"
     if torch.backends.mps.is_available()
     else "cpu"
 )
 
-VOCAB_SIZE = 8000
+VOCAB_SIZE = 16000
 
-TEMPERATURE = 0.8
-TOP_K = 30
-MAX_NEW_TOKENS = 60
+TEMPERATURE = 0.4
 
-REPETITION_PENALTY = 1.2
+TOP_K = 15
+
+MAX_NEW_TOKENS = 50
+
+REPETITION_PENALTY = 1.15
 
 STRATEGY = "Reflection of feelings"
 
 
+# ==========================================================
+# Load Tokenizer
+# ==========================================================
+
 tokenizer = Tokenizer.from_file(
     "tokenizer.json"
 )
+
+bos_id = tokenizer.token_to_id(
+    "[BOS]"
+)
+
+eos_id = tokenizer.token_to_id(
+    "[EOS]"
+)
+
+
+# ==========================================================
+# Load Model
+# ==========================================================
 
 model = MiniGPT(
     vocab_size=VOCAB_SIZE,
@@ -42,17 +64,25 @@ model = MiniGPT(
     max_seq_len=512
 )
 
-model.load_state_dict(
-    torch.load(
-        "checkpoints/best_model.pt",
-        map_location=DEVICE
-    )
+checkpoint = torch.load(
+    "checkpoints/best_model.pt",
+    map_location=DEVICE
 )
 
-model.to(DEVICE)
+model.load_state_dict(
+    checkpoint["model"]
+)
+
+model.to(
+    DEVICE
+)
 
 model.eval()
 
+
+# ==========================================================
+# Initial Context
+# ==========================================================
 
 emotion = input(
     "Emotion: "
@@ -63,49 +93,83 @@ problem = input(
 )
 
 history = (
-    f"Emotion: {emotion} "
-    f"Problem: {problem} "
-    f"Strategy: {STRATEGY} "
+    f"Emotion: {emotion}\n"
+    f"Problem: {problem}\n"
+    f"Strategy: {STRATEGY}\n\n"
 )
 
 print("\nChat Started")
 print("Type 'quit' to exit\n")
 
 
+# ==========================================================
+# Chat Loop
+# ==========================================================
+
 while True:
 
-    user_text = input("You: ")
-
-    if user_text.lower() == "quit":
-        break
-
-    history += (
-        f"User: {user_text} "
-        f"Assistant: "
-        f"<RESPONSE> "
+    user_text = input(
+        "You: "
     )
 
-    # Keep context close to training distribution
-    words = history.split()
+    if (
+        user_text.lower()
+        == "quit"
+    ):
+        break
 
-    if len(words) > 120:
-        history = " ".join(
-            words[-120:]
+    # ------------------------------------------------------
+    # Store user message
+    # ------------------------------------------------------
+
+    history += (
+        f"User: {user_text}\n"
+    )
+
+    # ------------------------------------------------------
+    # Build prompt
+    # ------------------------------------------------------
+
+    prompt = (
+        history
+        + "Assistant:\n"
+        + "<RESPONSE>\n"
+    )
+
+    words = prompt.split()
+
+    if len(words) > 220:
+
+        prompt = " ".join(
+            words[-220:]
         )
 
     encoding = tokenizer.encode(
-        history
+        prompt
     )
 
     input_ids = torch.tensor(
-        [encoding.ids],
+        [
+            [bos_id]
+            + encoding.ids
+        ],
         dtype=torch.long,
         device=DEVICE
     )
 
+    prompt_length = (
+        input_ids.shape[1]
+    )
+
+    # ------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------
+
     with torch.no_grad():
 
-        for _ in range(MAX_NEW_TOKENS):
+        for _ in range(
+            MAX_NEW_TOKENS
+        ):
 
             logits = model(
                 input_ids
@@ -117,19 +181,25 @@ while True:
                 :
             ]
 
-            # repetition penalty
+            # Repetition penalty
+
             for token_id in set(
                 input_ids[0].tolist()
             ):
+
                 next_token_logits[
                     0,
                     token_id
                 ] /= REPETITION_PENALTY
 
+            # Temperature
+
             next_token_logits = (
                 next_token_logits
                 / TEMPERATURE
             )
+
+            # Top-K
 
             topk_values, topk_indices = (
                 torch.topk(
@@ -157,6 +227,14 @@ while True:
                 )
             )
 
+            # EOS stopping
+
+            if (
+                next_token.item()
+                == eos_id
+            ):
+                break
+
             input_ids = torch.cat(
                 [
                     input_ids,
@@ -165,44 +243,27 @@ while True:
                 dim=1
             )
 
-            current_text = tokenizer.decode(
-                input_ids[0]
-                .cpu()
-                .tolist()
-            )
+    # ------------------------------------------------------
+    # Decode ONLY generated tokens
+    # ------------------------------------------------------
 
-            generated_part = current_text[
-                len(history):
-            ]
-
-            # Stop if model starts a new section
-            if (
-                "User:" in generated_part
-                or "Assistant:" in generated_part
-                or "Emotion:" in generated_part
-                or "Problem:" in generated_part
-                or "Strategy:" in generated_part
-                or "<RESPONSE>" in generated_part
-            ):
-                break
-
-            # Soft token-length limit
-            generated_tokens = tokenizer.encode(
-                generated_part
-            ).ids
-
-            if len(generated_tokens) > 50:
-                break
-
-    generated_text = tokenizer.decode(
+    generated_ids = (
         input_ids[0]
         .cpu()
         .tolist()
     )
 
-    reply = generated_text[
-        len(history):
+    reply_ids = generated_ids[
+        prompt_length:
     ]
+
+    reply = tokenizer.decode(
+        reply_ids
+    )
+
+    # ------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------
 
     for stop_token in [
         "User:",
@@ -212,21 +273,34 @@ while True:
         "Strategy:",
         "<RESPONSE>"
     ]:
+
         if stop_token in reply:
+
             reply = reply.split(
                 stop_token
             )[0]
 
     reply = reply.strip()
 
-    if not reply:
+    if len(reply) == 0:
+
         reply = (
             "I understand. "
             "Could you tell me a little more about that?"
         )
 
-    print(f"\nBot: {reply}\n")
+    # ------------------------------------------------------
+    # Display
+    # ------------------------------------------------------
+
+    print(
+        f"\nBot: {reply}\n"
+    )
+
+    # ------------------------------------------------------
+    # Save assistant reply
+    # ------------------------------------------------------
 
     history += (
-        reply + " "
+        f"Assistant: {reply}\n"
     )
